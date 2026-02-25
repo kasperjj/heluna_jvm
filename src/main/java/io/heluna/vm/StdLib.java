@@ -6,6 +6,7 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -24,6 +25,15 @@ import java.util.regex.Pattern;
 public class StdLib {
 
     private String timestamp = "2024-01-01T00:00:00Z";
+    private MessageDigest sha256Digest;
+
+    private MessageDigest getSha256() {
+        if (sha256Digest == null) {
+            try { sha256Digest = MessageDigest.getInstance("SHA-256"); }
+            catch (NoSuchAlgorithmException e) { throw new RuntimeException(e); }
+        }
+        return sha256Digest;
+    }
 
     public void setTimestamp(String timestamp) {
         this.timestamp = timestamp;
@@ -201,7 +211,7 @@ public class StdLib {
         // The spec uses "search" for the contains function parameter name
         HVal sub = args.get("substring");
         if (sub.isNothing()) sub = args.get("search");
-        if (sub instanceof HVal.HString) {
+        if (sub.typeCode() == HVal.TYPE_STRING) {
             return HVal.HBoolean.of(s.contains(((HVal.HString) sub).value()));
         }
         throw new HelunaException("contains: missing substring/search argument");
@@ -209,11 +219,11 @@ public class StdLib {
 
     private HVal length(HVal.HRecord args) {
         HVal listVal = args.get("list");
-        if (listVal instanceof HVal.HList) {
-            return new HVal.HInteger(((HVal.HList) listVal).size());
+        if (listVal.typeCode() == HVal.TYPE_LIST) {
+            return HVal.HInteger.of(((HVal.HList) listVal).size());
         }
         String s = getStr(args, "value");
-        return new HVal.HInteger(s.codePointCount(0, s.length()));
+        return HVal.HInteger.of(s.codePointCount(0, s.length()));
     }
 
     private HVal padLeft(HVal.HRecord args) {
@@ -269,22 +279,22 @@ public class StdLib {
 
     private HVal abs(HVal.HRecord args) {
         HVal v = args.get("value");
-        if (v instanceof HVal.HInteger) return new HVal.HInteger(Math.abs(((HVal.HInteger) v).value()));
-        if (v instanceof HVal.HFloat) return new HVal.HFloat(Math.abs(((HVal.HFloat) v).value()));
+        if (v.typeCode() == HVal.TYPE_INTEGER) return HVal.HInteger.of(Math.abs(((HVal.HInteger) v).value()));
+        if (v.typeCode() == HVal.TYPE_FLOAT) return new HVal.HFloat(Math.abs(((HVal.HFloat) v).value()));
         throw new HelunaException("abs: expected number");
     }
 
     private HVal ceil(HVal.HRecord args) {
-        return new HVal.HInteger((long) Math.ceil(getNum(args, "value")));
+        return HVal.HInteger.of((long) Math.ceil(getNum(args, "value")));
     }
 
     private HVal floor(HVal.HRecord args) {
-        return new HVal.HInteger((long) Math.floor(getNum(args, "value")));
+        return HVal.HInteger.of((long) Math.floor(getNum(args, "value")));
     }
 
     private HVal round(HVal.HRecord args) {
         double v = getNum(args, "value");
-        return new HVal.HInteger((long) Math.floor(v + 0.5));
+        return HVal.HInteger.of((long) Math.floor(v + 0.5));
     }
 
     private HVal min(HVal.HRecord args) {
@@ -319,11 +329,12 @@ public class StdLib {
         HVal.HList list = getList(args, "list");
         ArrayList<HVal> sorted = new ArrayList<>(list.elements());
         sorted.sort((a, b) -> {
-            if ((a instanceof HVal.HInteger || a instanceof HVal.HFloat) &&
-                (b instanceof HVal.HInteger || b instanceof HVal.HFloat)) {
+            byte ta = a.typeCode(), tb = b.typeCode();
+            if ((ta == HVal.TYPE_INTEGER || ta == HVal.TYPE_FLOAT) &&
+                (tb == HVal.TYPE_INTEGER || tb == HVal.TYPE_FLOAT)) {
                 return Double.compare(toDouble(a), toDouble(b));
             }
-            if (a instanceof HVal.HString && b instanceof HVal.HString) {
+            if (ta == HVal.TYPE_STRING && tb == HVal.TYPE_STRING) {
                 return ((HVal.HString) a).value().compareTo(((HVal.HString) b).value());
             }
             return 0;
@@ -336,13 +347,14 @@ public class StdLib {
         String field = getStr(args, "field");
         ArrayList<HVal> sorted = new ArrayList<>(list.elements());
         sorted.sort((a, b) -> {
-            HVal fa = (a instanceof HVal.HRecord) ? ((HVal.HRecord) a).get(field) : HVal.HNothing.INSTANCE;
-            HVal fb = (b instanceof HVal.HRecord) ? ((HVal.HRecord) b).get(field) : HVal.HNothing.INSTANCE;
-            if ((fa instanceof HVal.HInteger || fa instanceof HVal.HFloat) &&
-                (fb instanceof HVal.HInteger || fb instanceof HVal.HFloat)) {
+            HVal fa = (a.typeCode() == HVal.TYPE_RECORD) ? ((HVal.HRecord) a).get(field) : HVal.HNothing.INSTANCE;
+            HVal fb = (b.typeCode() == HVal.TYPE_RECORD) ? ((HVal.HRecord) b).get(field) : HVal.HNothing.INSTANCE;
+            byte tfa = fa.typeCode(), tfb = fb.typeCode();
+            if ((tfa == HVal.TYPE_INTEGER || tfa == HVal.TYPE_FLOAT) &&
+                (tfb == HVal.TYPE_INTEGER || tfb == HVal.TYPE_FLOAT)) {
                 return Double.compare(toDouble(fa), toDouble(fb));
             }
-            if (fa instanceof HVal.HString && fb instanceof HVal.HString) {
+            if (tfa == HVal.TYPE_STRING && tfb == HVal.TYPE_STRING) {
                 return ((HVal.HString) fa).value().compareTo(((HVal.HString) fb).value());
             }
             return 0;
@@ -360,10 +372,9 @@ public class StdLib {
     private HVal unique(HVal.HRecord args) {
         HVal.HList list = getList(args, "list");
         HVal.HList result = new HVal.HList();
-        LinkedHashSet<String> seen = new LinkedHashSet<>();
+        LinkedHashSet<HVal> seen = new LinkedHashSet<>();
         for (HVal v : list.elements()) {
-            String key = v.toString();
-            if (seen.add(key)) result.add(v);
+            if (seen.add(v)) result.add(v);
         }
         return result;
     }
@@ -372,7 +383,7 @@ public class StdLib {
         HVal.HList list = getList(args, "list");
         HVal.HList result = new HVal.HList();
         for (HVal v : list.elements()) {
-            if (v instanceof HVal.HList) {
+            if (v.typeCode() == HVal.TYPE_LIST) {
                 for (HVal inner : ((HVal.HList) v).elements()) {
                     result.add(inner);
                 }
@@ -402,9 +413,9 @@ public class StdLib {
         long end = getInt(args, "end");
         HVal.HList result = new HVal.HList();
         if (start <= end) {
-            for (long i = start; i <= end; i++) result.add(new HVal.HInteger(i));
+            for (long i = start; i <= end; i++) result.add(HVal.HInteger.of(i));
         } else {
-            for (long i = start; i >= end; i--) result.add(new HVal.HInteger(i));
+            for (long i = start; i >= end; i--) result.add(HVal.HInteger.of(i));
         }
         return result;
     }
@@ -482,12 +493,12 @@ public class StdLib {
         DateTimeFormatter fmt = convertFormat(format);
         LocalDateTime dt = LocalDateTime.parse(value, fmt);
         HVal.HRecord result = new HVal.HRecord();
-        result.set("year", new HVal.HInteger(dt.getYear()));
-        result.set("month", new HVal.HInteger(dt.getMonthValue()));
-        result.set("day", new HVal.HInteger(dt.getDayOfMonth()));
-        result.set("hour", new HVal.HInteger(dt.getHour()));
-        result.set("minute", new HVal.HInteger(dt.getMinute()));
-        result.set("second", new HVal.HInteger(dt.getSecond()));
+        result.set("year", HVal.HInteger.of(dt.getYear()));
+        result.set("month", HVal.HInteger.of(dt.getMonthValue()));
+        result.set("day", HVal.HInteger.of(dt.getDayOfMonth()));
+        result.set("hour", HVal.HInteger.of(dt.getHour()));
+        result.set("minute", HVal.HInteger.of(dt.getMinute()));
+        result.set("second", HVal.HInteger.of(dt.getSecond()));
         return result;
     }
 
@@ -520,7 +531,7 @@ public class StdLib {
             case "days":    diff = ChronoUnit.DAYS.between(dtFrom, dtTo); break;
             default: throw new HelunaException("dateDiff: unknown unit " + unit);
         }
-        return new HVal.HInteger(diff);
+        return HVal.HInteger.of(diff);
     }
 
     private HVal dateAdd(HVal.HRecord args) {
@@ -584,13 +595,10 @@ public class StdLib {
 
     private HVal sha256(HVal.HRecord args) {
         String s = getStr(args, "value");
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest(s.getBytes(StandardCharsets.UTF_8));
-            return new HVal.HString(bytesToHex(hash));
-        } catch (Exception e) {
-            throw new HelunaException("sha256 failed: " + e.getMessage());
-        }
+        MessageDigest md = getSha256();
+        md.reset();
+        byte[] hash = md.digest(s.getBytes(StandardCharsets.UTF_8));
+        return new HVal.HString(bytesToHex(hash));
     }
 
     private HVal hmacSha256(HVal.HRecord args) {
@@ -618,24 +626,28 @@ public class StdLib {
 
     private HVal toFloatFn(HVal.HRecord args) {
         HVal v = args.get("value");
-        if (v instanceof HVal.HFloat) return v;
-        if (v instanceof HVal.HInteger) return new HVal.HFloat((double) ((HVal.HInteger) v).value());
-        if (v instanceof HVal.HString) return new HVal.HFloat(Double.parseDouble(((HVal.HString) v).value()));
-        throw new HelunaException("to-float: cannot convert " + Executor.typeName(v));
+        switch (v.typeCode()) {
+            case HVal.TYPE_FLOAT:   return v;
+            case HVal.TYPE_INTEGER: return new HVal.HFloat((double) ((HVal.HInteger) v).value());
+            case HVal.TYPE_STRING:  return new HVal.HFloat(Double.parseDouble(((HVal.HString) v).value()));
+            default: throw new HelunaException("to-float: cannot convert " + Executor.typeName(v));
+        }
     }
 
     private HVal toIntegerFn(HVal.HRecord args) {
         HVal v = args.get("value");
-        if (v instanceof HVal.HInteger) return v;
-        if (v instanceof HVal.HFloat) return new HVal.HInteger((long) ((HVal.HFloat) v).value());
-        if (v instanceof HVal.HString) {
-            String s = ((HVal.HString) v).value();
-            try { return new HVal.HInteger(Long.parseLong(s)); }
-            catch (NumberFormatException e) {
-                return new HVal.HInteger((long) Double.parseDouble(s));
+        switch (v.typeCode()) {
+            case HVal.TYPE_INTEGER: return v;
+            case HVal.TYPE_FLOAT:   return HVal.HInteger.of((long) ((HVal.HFloat) v).value());
+            case HVal.TYPE_STRING: {
+                String s = ((HVal.HString) v).value();
+                try { return HVal.HInteger.of(Long.parseLong(s)); }
+                catch (NumberFormatException e) {
+                    return HVal.HInteger.of((long) Double.parseDouble(s));
+                }
             }
+            default: throw new HelunaException("to-integer: cannot convert " + Executor.typeName(v));
         }
-        throw new HelunaException("to-integer: cannot convert " + Executor.typeName(v));
     }
 
     // ========== Iteration ==========
@@ -663,21 +675,22 @@ public class StdLib {
 
     private String getStr(HVal.HRecord rec, String field) {
         HVal v = rec.get(field);
-        if (v instanceof HVal.HString) return ((HVal.HString) v).value();
+        if (v.typeCode() == HVal.TYPE_STRING) return ((HVal.HString) v).value();
         if (v.isNothing()) return "";
         return Executor.valToString(v);
     }
 
     private long getInt(HVal.HRecord rec, String field) {
         HVal v = rec.get(field);
-        if (v instanceof HVal.HInteger) return ((HVal.HInteger) v).value();
-        if (v instanceof HVal.HFloat) return (long) ((HVal.HFloat) v).value();
+        byte tc = v.typeCode();
+        if (tc == HVal.TYPE_INTEGER) return ((HVal.HInteger) v).value();
+        if (tc == HVal.TYPE_FLOAT) return (long) ((HVal.HFloat) v).value();
         return 0;
     }
 
     private long getIntFromRecord(HVal.HRecord rec, String field) {
         HVal v = rec.get(field);
-        if (v instanceof HVal.HInteger) return ((HVal.HInteger) v).value();
+        if (v.typeCode() == HVal.TYPE_INTEGER) return ((HVal.HInteger) v).value();
         return 0;
     }
 
@@ -688,37 +701,38 @@ public class StdLib {
 
     private HVal.HList getList(HVal.HRecord rec, String field) {
         HVal v = rec.get(field);
-        if (v instanceof HVal.HList) return (HVal.HList) v;
+        if (v.typeCode() == HVal.TYPE_LIST) return (HVal.HList) v;
         return new HVal.HList();
     }
 
     private HVal.HRecord getRecord(HVal.HRecord rec, String field) {
         HVal v = rec.get(field);
-        if (v instanceof HVal.HRecord) return (HVal.HRecord) v;
+        if (v.typeCode() == HVal.TYPE_RECORD) return (HVal.HRecord) v;
         return new HVal.HRecord();
     }
 
     private double toDouble(HVal v) {
-        if (v instanceof HVal.HInteger) return (double) ((HVal.HInteger) v).value();
-        if (v instanceof HVal.HFloat) return ((HVal.HFloat) v).value();
+        byte tc = v.typeCode();
+        if (tc == HVal.TYPE_INTEGER) return (double) ((HVal.HInteger) v).value();
+        if (tc == HVal.TYPE_FLOAT) return ((HVal.HFloat) v).value();
         return 0;
     }
 
     private HVal numFromDouble(double d, HVal reference) {
-        if (reference instanceof HVal.HInteger) return new HVal.HInteger((long) d);
+        if (reference.typeCode() == HVal.TYPE_INTEGER) return HVal.HInteger.of((long) d);
         return new HVal.HFloat(d);
     }
 
     private HVal addValues(HVal a, HVal b) {
-        if (a instanceof HVal.HInteger && b instanceof HVal.HInteger) {
-            return new HVal.HInteger(((HVal.HInteger) a).value() + ((HVal.HInteger) b).value());
+        if (a.typeCode() == HVal.TYPE_INTEGER && b.typeCode() == HVal.TYPE_INTEGER) {
+            return HVal.HInteger.of(((HVal.HInteger) a).value() + ((HVal.HInteger) b).value());
         }
         return new HVal.HFloat(toDouble(a) + toDouble(b));
     }
 
     private HVal mulValues(HVal a, HVal b) {
-        if (a instanceof HVal.HInteger && b instanceof HVal.HInteger) {
-            return new HVal.HInteger(((HVal.HInteger) a).value() * ((HVal.HInteger) b).value());
+        if (a.typeCode() == HVal.TYPE_INTEGER && b.typeCode() == HVal.TYPE_INTEGER) {
+            return HVal.HInteger.of(((HVal.HInteger) a).value() * ((HVal.HInteger) b).value());
         }
         return new HVal.HFloat(toDouble(a) * toDouble(b));
     }
@@ -752,43 +766,48 @@ public class StdLib {
     // ========== JSON serialization/parsing ==========
 
     static String toJson(HVal v) {
-        if (v instanceof HVal.HString) {
-            return "\"" + escapeJson(((HVal.HString) v).value()) + "\"";
-        }
-        if (v instanceof HVal.HInteger) return Long.toString(((HVal.HInteger) v).value());
-        if (v instanceof HVal.HFloat) {
-            double d = ((HVal.HFloat) v).value();
-            if (d == Math.floor(d) && !Double.isInfinite(d) && Math.abs(d) < 1e15) {
-                return Long.toString((long) d) + ".0";
+        switch (v.typeCode()) {
+            case HVal.TYPE_STRING:
+                return "\"" + escapeJson(((HVal.HString) v).value()) + "\"";
+            case HVal.TYPE_INTEGER:
+                return Long.toString(((HVal.HInteger) v).value());
+            case HVal.TYPE_FLOAT: {
+                double d = ((HVal.HFloat) v).value();
+                if (d == Math.floor(d) && !Double.isInfinite(d) && Math.abs(d) < 1e15) {
+                    return Long.toString((long) d) + ".0";
+                }
+                return Double.toString(d);
             }
-            return Double.toString(d);
-        }
-        if (v instanceof HVal.HBoolean) return ((HVal.HBoolean) v).value() ? "true" : "false";
-        if (v instanceof HVal.HNothing) return "null";
-        if (v instanceof HVal.HList) {
-            StringBuilder sb = new StringBuilder("[");
-            HVal.HList list = (HVal.HList) v;
-            for (int i = 0; i < list.size(); i++) {
-                if (i > 0) sb.append(",");
-                sb.append(toJson(list.elements().get(i)));
+            case HVal.TYPE_BOOLEAN:
+                return ((HVal.HBoolean) v).value() ? "true" : "false";
+            case HVal.TYPE_NOTHING:
+                return "null";
+            case HVal.TYPE_LIST: {
+                StringBuilder sb = new StringBuilder("[");
+                HVal.HList list = (HVal.HList) v;
+                for (int i = 0; i < list.size(); i++) {
+                    if (i > 0) sb.append(",");
+                    sb.append(toJson(list.elements().get(i)));
+                }
+                sb.append("]");
+                return sb.toString();
             }
-            sb.append("]");
-            return sb.toString();
-        }
-        if (v instanceof HVal.HRecord) {
-            StringBuilder sb = new StringBuilder("{");
-            HVal.HRecord rec = (HVal.HRecord) v;
-            boolean first = true;
-            for (var e : rec.fields().entrySet()) {
-                if (!first) sb.append(",");
-                first = false;
-                sb.append("\"").append(escapeJson(e.getKey())).append("\":");
-                sb.append(toJson(e.getValue()));
+            case HVal.TYPE_RECORD: {
+                StringBuilder sb = new StringBuilder("{");
+                HVal.HRecord rec = (HVal.HRecord) v;
+                boolean first = true;
+                for (var e : rec.fields().entrySet()) {
+                    if (!first) sb.append(",");
+                    first = false;
+                    sb.append("\"").append(escapeJson(e.getKey())).append("\":");
+                    sb.append(toJson(e.getValue()));
+                }
+                sb.append("}");
+                return sb.toString();
             }
-            sb.append("}");
-            return sb.toString();
+            default:
+                return "null";
         }
-        return "null";
     }
 
     private static String escapeJson(String s) {
@@ -871,7 +890,7 @@ public class StdLib {
         }
         String num = s.substring(start, pos[0]);
         if (isFloat) return new HVal.HFloat(Double.parseDouble(num));
-        return new HVal.HInteger(Long.parseLong(num));
+        return HVal.HInteger.of(Long.parseLong(num));
     }
 
     private static HVal parseJsonObject(String s, int[] pos) {

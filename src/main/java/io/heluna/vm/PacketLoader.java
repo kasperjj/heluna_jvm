@@ -217,7 +217,7 @@ public class PacketLoader {
                 }
                 case HVal.TYPE_INTEGER: {
                     long v = buf.getLong(pos);
-                    pkt.constants.add(new HVal.HInteger(v));
+                    pkt.constants.add(HVal.HInteger.of(v));
                     break;
                 }
                 case HVal.TYPE_FLOAT: {

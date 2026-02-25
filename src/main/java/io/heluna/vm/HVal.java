@@ -27,6 +27,22 @@ public abstract class HVal {
     // --- Concrete subclasses ---
 
     public static final class HInteger extends HVal {
+        private static final int CACHE_LOW = -128;
+        private static final int CACHE_HIGH = 127;
+        private static final HInteger[] CACHE = new HInteger[CACHE_HIGH - CACHE_LOW + 1];
+        static {
+            for (int i = 0; i < CACHE.length; i++) {
+                CACHE[i] = new HInteger(i + CACHE_LOW);
+            }
+        }
+
+        public static HInteger of(long value) {
+            if (value >= CACHE_LOW && value <= CACHE_HIGH) {
+                return CACHE[(int) value - CACHE_LOW];
+            }
+            return new HInteger(value);
+        }
+
         private final long value;
 
         public HInteger(long value) {

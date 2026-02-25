@@ -26,9 +26,31 @@ public class Executor {
     // Tag modes (from flags bits 3-4)
     public static final int TAG_PROPAGATE = 0, TAG_CLEAR = 1, TAG_MODE_SET = 2;
 
+    private static class IterState {
+        final int mode, dest, bodyStart, bodyEnd, resultSlot, slotA, slotB;
+        final long srcTags;
+        final ArrayList<HVal> elements;
+        final int size;
+        HVal.HList result; // null for FOLD
+        int idx;
+
+        IterState(int mode, int dest, int bodyStart, int bodyEnd,
+                  int resultSlot, int slotA, int slotB,
+                  long srcTags, ArrayList<HVal> elements) {
+            this.mode = mode; this.dest = dest;
+            this.bodyStart = bodyStart; this.bodyEnd = bodyEnd;
+            this.resultSlot = resultSlot; this.slotA = slotA; this.slotB = slotB;
+            this.srcTags = srcTags;
+            this.elements = elements; this.size = elements.size();
+            this.result = (mode == 2) ? null : new HVal.HList();
+            this.idx = 0;
+        }
+    }
+
     private final Packet packet;
     private final HVal[] values;
     private final long[] tags;
+    private final Deque<IterState> iterStack = new ArrayDeque<>();
     private StdLib stdLib;
 
     public Executor(Packet packet) {
@@ -110,20 +132,50 @@ public class Executor {
                     break;
 
                 // --- Arithmetic ---
-                case ADD: execArith(dest, op1, op2, tagMode, '+'); break;
-                case SUB: execArith(dest, op1, op2, tagMode, '-'); break;
-                case MUL: execArith(dest, op1, op2, tagMode, '*'); break;
+                case ADD: {
+                    HVal left = values[op1], right = values[op2];
+                    if (left.typeCode() == HVal.TYPE_INTEGER && right.typeCode() == HVal.TYPE_INTEGER) {
+                        values[dest] = HVal.HInteger.of(((HVal.HInteger) left).value() + ((HVal.HInteger) right).value());
+                        applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
+                    } else {
+                        execArith(dest, op1, op2, tagMode, '+');
+                    }
+                    break;
+                }
+                case SUB: {
+                    HVal left = values[op1], right = values[op2];
+                    if (left.typeCode() == HVal.TYPE_INTEGER && right.typeCode() == HVal.TYPE_INTEGER) {
+                        values[dest] = HVal.HInteger.of(((HVal.HInteger) left).value() - ((HVal.HInteger) right).value());
+                        applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
+                    } else {
+                        execArith(dest, op1, op2, tagMode, '-');
+                    }
+                    break;
+                }
+                case MUL: {
+                    HVal left = values[op1], right = values[op2];
+                    if (left.typeCode() == HVal.TYPE_INTEGER && right.typeCode() == HVal.TYPE_INTEGER) {
+                        values[dest] = HVal.HInteger.of(((HVal.HInteger) left).value() * ((HVal.HInteger) right).value());
+                        applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
+                    } else {
+                        execArith(dest, op1, op2, tagMode, '*');
+                    }
+                    break;
+                }
                 case DIV: execArith(dest, op1, op2, tagMode, '/'); break;
                 case MOD: execArith(dest, op1, op2, tagMode, '%'); break;
 
                 case NEGATE: {
                     HVal v = values[op1];
-                    if (v instanceof HVal.HInteger) {
-                        values[dest] = new HVal.HInteger(-((HVal.HInteger) v).value());
-                    } else if (v instanceof HVal.HFloat) {
-                        values[dest] = new HVal.HFloat(-((HVal.HFloat) v).value());
-                    } else {
-                        throw new HelunaException("NEGATE requires numeric, got " + typeName(v));
+                    switch (v.typeCode()) {
+                        case HVal.TYPE_INTEGER:
+                            values[dest] = HVal.HInteger.of(-((HVal.HInteger) v).value());
+                            break;
+                        case HVal.TYPE_FLOAT:
+                            values[dest] = new HVal.HFloat(-((HVal.HFloat) v).value());
+                            break;
+                        default:
+                            throw new HelunaException("NEGATE requires numeric, got " + typeName(v));
                     }
                     applyTagMode(dest, tagMode, tags[op1]);
                     break;
@@ -167,19 +219,19 @@ public class Executor {
                 }
 
                 // --- Type Testing ---
-                case IS_STRING:  values[dest] = HVal.HBoolean.of(values[op1] instanceof HVal.HString);
+                case IS_STRING:  values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_STRING);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
-                case IS_INT:     values[dest] = HVal.HBoolean.of(values[op1] instanceof HVal.HInteger);
+                case IS_INT:     values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_INTEGER);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
-                case IS_FLOAT:   values[dest] = HVal.HBoolean.of(values[op1] instanceof HVal.HFloat);
+                case IS_FLOAT:   values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_FLOAT);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
-                case IS_BOOL:    values[dest] = HVal.HBoolean.of(values[op1] instanceof HVal.HBoolean);
+                case IS_BOOL:    values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_BOOLEAN);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
-                case IS_NOTHING: values[dest] = HVal.HBoolean.of(values[op1].isNothing());
+                case IS_NOTHING: values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_NOTHING);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
-                case IS_LIST:    values[dest] = HVal.HBoolean.of(values[op1] instanceof HVal.HList);
+                case IS_LIST:    values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_LIST);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
-                case IS_RECORD:  values[dest] = HVal.HBoolean.of(values[op1] instanceof HVal.HRecord);
+                case IS_RECORD:  values[dest] = HVal.HBoolean.of(values[op1].typeCode() == HVal.TYPE_RECORD);
                                  applyTagMode(dest, tagMode, tags[op1]); break;
 
                 // --- Type Conversion ---
@@ -241,7 +293,7 @@ public class Executor {
                 case LIST_GET: {
                     HVal.HList list = asList(op1);
                     HVal idx = values[op2];
-                    if (!(idx instanceof HVal.HInteger)) {
+                    if (idx.typeCode() != HVal.TYPE_INTEGER) {
                         throw new HelunaException("LIST_GET index must be integer");
                     }
                     values[dest] = list.get((int) ((HVal.HInteger) idx).value());
@@ -250,7 +302,7 @@ public class Executor {
                 }
                 case LIST_LENGTH: {
                     HVal.HList list = asList(op1);
-                    values[dest] = new HVal.HInteger(list.size());
+                    values[dest] = HVal.HInteger.of(list.size());
                     applyTagMode(dest, tagMode, tags[op1]);
                     break;
                 }
@@ -283,82 +335,82 @@ public class Executor {
                 case ITER_SETUP: {
                     int mode = flags & 0x03;
                     HVal src = values[op1];
-                    if (!(src instanceof HVal.HList)) {
+                    if (src.typeCode() != HVal.TYPE_LIST) {
                         throw new HelunaException("ITER_SETUP source must be list");
                     }
                     HVal.HList srcList = (HVal.HList) src;
                     int bodyLen = op2;
                     int bodyStart = pc + 1;
                     int collectPc = bodyStart + bodyLen;
-
-                    // Get collect instruction for result slot info
                     int[] collectInstr = instructions[collectPc];
                     int resultSlot = collectInstr[2];
                     int slotA = collectInstr[3];
                     int slotB = collectInstr[4];
 
-                    switch (mode) {
-                        case 0: { // MAP
-                            HVal.HList result = new HVal.HList();
-                            for (int i = 0; i < srcList.size(); i++) {
-                                values[dest] = srcList.elements().get(i);
-                                tags[dest] = tags[op1];
-                                execute(instructions, bodyStart, bodyStart + bodyLen);
-                                result.add(values[slotA]);
-                            }
-                            values[resultSlot] = result;
-                            tags[resultSlot] = tags[op1];
-                            break;
-                        }
-                        case 1: { // FILTER
-                            HVal.HList result = new HVal.HList();
-                            for (int i = 0; i < srcList.size(); i++) {
-                                values[dest] = srcList.elements().get(i);
-                                tags[dest] = tags[op1];
-                                execute(instructions, bodyStart, bodyStart + bodyLen);
-                                if (values[slotA] instanceof HVal.HBoolean &&
-                                        ((HVal.HBoolean) values[slotA]).value()) {
-                                    result.add(values[slotB]);
-                                }
-                            }
-                            values[resultSlot] = result;
-                            tags[resultSlot] = tags[op1];
-                            break;
-                        }
-                        case 2: { // FOLD
-                            // Accumulator is pre-initialized at slotA
-                            for (int i = 0; i < srcList.size(); i++) {
-                                values[dest] = srcList.elements().get(i);
-                                tags[dest] = tags[op1];
-                                execute(instructions, bodyStart, bodyStart + bodyLen);
-                            }
+                    ArrayList<HVal> elems = srcList.elements();
+                    if (elems.isEmpty()) {
+                        // Empty list — produce empty result or unchanged accumulator
+                        if (mode == 2) { // FOLD
                             values[resultSlot] = values[slotA];
                             tags[resultSlot] = tags[slotA];
-                            break;
-                        }
-                        case 3: { // MAP_FILTER
-                            HVal.HList result = new HVal.HList();
-                            for (int i = 0; i < srcList.size(); i++) {
-                                values[dest] = srcList.elements().get(i);
-                                tags[dest] = tags[op1];
-                                execute(instructions, bodyStart, bodyStart + bodyLen);
-                                if (values[slotA] instanceof HVal.HBoolean &&
-                                        ((HVal.HBoolean) values[slotA]).value()) {
-                                    result.add(values[slotB]);
-                                }
-                            }
-                            values[resultSlot] = result;
+                        } else {
+                            values[resultSlot] = new HVal.HList();
                             tags[resultSlot] = tags[op1];
-                            break;
                         }
+                        pc = collectPc + 1;
+                        continue;
                     }
-                    pc = collectPc + 1; // skip past ITER_COLLECT
+
+                    IterState state = new IterState(mode, dest, bodyStart, bodyStart + bodyLen,
+                                                     resultSlot, slotA, slotB, tags[op1], elems);
+                    iterStack.push(state);
+
+                    // Set up first element and jump into body
+                    values[dest] = elems.get(0);
+                    tags[dest] = tags[op1];
+                    pc = bodyStart;
                     continue;
                 }
 
-                case ITER_COLLECT:
-                    // Handled by ITER_SETUP
-                    break;
+                case ITER_COLLECT: {
+                    IterState state = iterStack.peek();
+
+                    // Process current element result
+                    switch (state.mode) {
+                        case 0: // MAP
+                            state.result.add(values[state.slotA]);
+                            break;
+                        case 1: // FILTER
+                        case 3: // MAP_FILTER
+                            if (values[state.slotA].typeCode() == HVal.TYPE_BOOLEAN &&
+                                    ((HVal.HBoolean) values[state.slotA]).value()) {
+                                state.result.add(values[state.slotB]);
+                            }
+                            break;
+                        case 2: // FOLD — accumulator already updated in slotA
+                            break;
+                    }
+
+                    state.idx++;
+                    if (state.idx < state.size) {
+                        // More elements — set up next and loop back
+                        values[state.dest] = state.elements.get(state.idx);
+                        tags[state.dest] = state.srcTags;
+                        pc = state.bodyStart;
+                        continue;
+                    }
+
+                    // Done — collect and pop
+                    iterStack.pop();
+                    if (state.mode == 2) { // FOLD
+                        values[state.resultSlot] = values[state.slotA];
+                        tags[state.resultSlot] = tags[state.slotA];
+                    } else {
+                        values[state.resultSlot] = state.result;
+                        tags[state.resultSlot] = state.srcTags;
+                    }
+                    break; // pc++ moves past ITER_COLLECT
+                }
 
                 // --- Standard Library ---
                 case STDLIB_CALL: {
@@ -382,7 +434,7 @@ public class Executor {
                 case TAG_SET: {
                     // op1 is constant index containing the tag value
                     HVal tagVal = packet.constants.get(op1);
-                    if (tagVal instanceof HVal.HInteger) {
+                    if (tagVal.typeCode() == HVal.TYPE_INTEGER) {
                         tags[dest] = ((HVal.HInteger) tagVal).value();
                     }
                     break;
@@ -390,7 +442,7 @@ public class Executor {
 
                 case TAG_CHECK: {
                     HVal tagVal = packet.constants.get(op2);
-                    long checkBits = (tagVal instanceof HVal.HInteger) ?
+                    long checkBits = (tagVal.typeCode() == HVal.TYPE_INTEGER) ?
                             ((HVal.HInteger) tagVal).value() : 0;
                     values[dest] = HVal.HBoolean.of((tags[op1] & checkBits) == checkBits);
                     applyTagMode(dest, tagMode, 0);
@@ -419,10 +471,12 @@ public class Executor {
         HVal left = values[op1];
         HVal right = values[op2];
 
-        boolean leftInt = left instanceof HVal.HInteger;
-        boolean leftFloat = left instanceof HVal.HFloat;
-        boolean rightInt = right instanceof HVal.HInteger;
-        boolean rightFloat = right instanceof HVal.HFloat;
+        byte leftType = left.typeCode();
+        byte rightType = right.typeCode();
+        boolean leftInt = leftType == HVal.TYPE_INTEGER;
+        boolean leftFloat = leftType == HVal.TYPE_FLOAT;
+        boolean rightInt = rightType == HVal.TYPE_INTEGER;
+        boolean rightFloat = rightType == HVal.TYPE_FLOAT;
 
         if (!((leftInt || leftFloat) && (rightInt || rightFloat))) {
             throw new HelunaException("Arithmetic requires numeric operands, got "
@@ -433,16 +487,16 @@ public class Executor {
             long a = ((HVal.HInteger) left).value();
             long b = ((HVal.HInteger) right).value();
             switch (op) {
-                case '+': values[dest] = new HVal.HInteger(a + b); break;
-                case '-': values[dest] = new HVal.HInteger(a - b); break;
-                case '*': values[dest] = new HVal.HInteger(a * b); break;
+                case '+': values[dest] = HVal.HInteger.of(a + b); break;
+                case '-': values[dest] = HVal.HInteger.of(a - b); break;
+                case '*': values[dest] = HVal.HInteger.of(a * b); break;
                 case '/':
                     if (b == 0) throw new HelunaException("Division by zero");
-                    values[dest] = new HVal.HInteger(a / b);
+                    values[dest] = HVal.HInteger.of(a / b);
                     break;
                 case '%':
                     if (b == 0) throw new HelunaException("Division by zero");
-                    values[dest] = new HVal.HInteger(a % b);
+                    values[dest] = HVal.HInteger.of(a % b);
                     break;
             }
         } else {
@@ -468,26 +522,29 @@ public class Executor {
     }
 
     private boolean valEquals(HVal a, HVal b) {
-        if (a instanceof HVal.HInteger && b instanceof HVal.HFloat) {
+        byte ta = a.typeCode(), tb = b.typeCode();
+        if (ta == HVal.TYPE_INTEGER && tb == HVal.TYPE_FLOAT) {
             return (double) ((HVal.HInteger) a).value() == ((HVal.HFloat) b).value();
         }
-        if (a instanceof HVal.HFloat && b instanceof HVal.HInteger) {
+        if (ta == HVal.TYPE_FLOAT && tb == HVal.TYPE_INTEGER) {
             return ((HVal.HFloat) a).value() == (double) ((HVal.HInteger) b).value();
         }
-        if (a.getClass() != b.getClass()) return false;
+        if (ta != tb) return false;
         return a.equals(b);
     }
 
     private int valCompare(HVal a, HVal b) {
-        if ((a instanceof HVal.HInteger || a instanceof HVal.HFloat) &&
-            (b instanceof HVal.HInteger || b instanceof HVal.HFloat)) {
-            double da = a instanceof HVal.HInteger ? (double) ((HVal.HInteger) a).value()
-                                                    : ((HVal.HFloat) a).value();
-            double db = b instanceof HVal.HInteger ? (double) ((HVal.HInteger) b).value()
-                                                    : ((HVal.HFloat) b).value();
+        byte ta = a.typeCode(), tb = b.typeCode();
+        boolean aNum = (ta == HVal.TYPE_INTEGER || ta == HVal.TYPE_FLOAT);
+        boolean bNum = (tb == HVal.TYPE_INTEGER || tb == HVal.TYPE_FLOAT);
+        if (aNum && bNum) {
+            double da = ta == HVal.TYPE_INTEGER ? (double) ((HVal.HInteger) a).value()
+                                                : ((HVal.HFloat) a).value();
+            double db = tb == HVal.TYPE_INTEGER ? (double) ((HVal.HInteger) b).value()
+                                                : ((HVal.HFloat) b).value();
             return Double.compare(da, db);
         }
-        if (a instanceof HVal.HString && b instanceof HVal.HString) {
+        if (ta == HVal.TYPE_STRING && tb == HVal.TYPE_STRING) {
             return ((HVal.HString) a).value().compareTo(((HVal.HString) b).value());
         }
         throw new HelunaException("Cannot compare " + typeName(a) + " with " + typeName(b));
@@ -495,91 +552,101 @@ public class Executor {
 
     private boolean asBool(int slot) {
         HVal v = values[slot];
-        if (v instanceof HVal.HBoolean) return ((HVal.HBoolean) v).value();
+        if (v.typeCode() == HVal.TYPE_BOOLEAN) return ((HVal.HBoolean) v).value();
         throw new HelunaException("Expected boolean at slot " + slot + ", got " + typeName(v));
     }
 
     private String asString(int slot) {
         HVal v = values[slot];
-        if (v instanceof HVal.HString) return ((HVal.HString) v).value();
+        if (v.typeCode() == HVal.TYPE_STRING) return ((HVal.HString) v).value();
         throw new HelunaException("Expected string at slot " + slot + ", got " + typeName(v));
     }
 
     private HVal.HRecord asRecord(int slot) {
         HVal v = values[slot];
-        if (v instanceof HVal.HRecord) return (HVal.HRecord) v;
+        if (v.typeCode() == HVal.TYPE_RECORD) return (HVal.HRecord) v;
         throw new HelunaException("Expected record at slot " + slot + ", got " + typeName(v));
     }
 
     private HVal.HList asList(int slot) {
         HVal v = values[slot];
-        if (v instanceof HVal.HList) return (HVal.HList) v;
+        if (v.typeCode() == HVal.TYPE_LIST) return (HVal.HList) v;
         throw new HelunaException("Expected list at slot " + slot + ", got " + typeName(v));
     }
 
     static String valToString(HVal v) {
-        if (v instanceof HVal.HString) return ((HVal.HString) v).value();
-        if (v instanceof HVal.HInteger) return Long.toString(((HVal.HInteger) v).value());
-        if (v instanceof HVal.HFloat) {
-            double d = ((HVal.HFloat) v).value();
-            if (d == Math.floor(d) && !Double.isInfinite(d)) {
-                return Long.toString((long) d) + ".0";
+        switch (v.typeCode()) {
+            case HVal.TYPE_STRING:  return ((HVal.HString) v).value();
+            case HVal.TYPE_INTEGER: return Long.toString(((HVal.HInteger) v).value());
+            case HVal.TYPE_FLOAT: {
+                double d = ((HVal.HFloat) v).value();
+                if (d == Math.floor(d) && !Double.isInfinite(d)) {
+                    return Long.toString((long) d) + ".0";
+                }
+                return Double.toString(d);
             }
-            return Double.toString(d);
+            case HVal.TYPE_BOOLEAN: return ((HVal.HBoolean) v).value() ? "true" : "false";
+            case HVal.TYPE_NOTHING: return "nothing";
+            default: return v.toString();
         }
-        if (v instanceof HVal.HBoolean) return ((HVal.HBoolean) v).value() ? "true" : "false";
-        if (v instanceof HVal.HNothing) return "nothing";
-        return v.toString();
     }
 
     private HVal toInteger(HVal v) {
-        if (v instanceof HVal.HInteger) return v;
-        if (v instanceof HVal.HFloat) return new HVal.HInteger((long) ((HVal.HFloat) v).value());
-        if (v instanceof HVal.HString) {
-            try {
-                return new HVal.HInteger(Long.parseLong(((HVal.HString) v).value()));
-            } catch (NumberFormatException e) {
+        switch (v.typeCode()) {
+            case HVal.TYPE_INTEGER: return v;
+            case HVal.TYPE_FLOAT:   return HVal.HInteger.of((long) ((HVal.HFloat) v).value());
+            case HVal.TYPE_STRING: {
                 try {
-                    return new HVal.HInteger((long) Double.parseDouble(((HVal.HString) v).value()));
-                } catch (NumberFormatException e2) {
-                    throw new HelunaException("Cannot convert string to integer: " + v);
+                    return HVal.HInteger.of(Long.parseLong(((HVal.HString) v).value()));
+                } catch (NumberFormatException e) {
+                    try {
+                        return HVal.HInteger.of((long) Double.parseDouble(((HVal.HString) v).value()));
+                    } catch (NumberFormatException e2) {
+                        throw new HelunaException("Cannot convert string to integer: " + v);
+                    }
                 }
             }
+            case HVal.TYPE_BOOLEAN: return HVal.HInteger.of(((HVal.HBoolean) v).value() ? 1 : 0);
+            default: throw new HelunaException("Cannot convert " + typeName(v) + " to integer");
         }
-        if (v instanceof HVal.HBoolean) return new HVal.HInteger(((HVal.HBoolean) v).value() ? 1 : 0);
-        throw new HelunaException("Cannot convert " + typeName(v) + " to integer");
     }
 
     private HVal toFloat(HVal v) {
-        if (v instanceof HVal.HFloat) return v;
-        if (v instanceof HVal.HInteger) return new HVal.HFloat((double) ((HVal.HInteger) v).value());
-        if (v instanceof HVal.HString) {
-            try {
-                return new HVal.HFloat(Double.parseDouble(((HVal.HString) v).value()));
-            } catch (NumberFormatException e) {
-                throw new HelunaException("Cannot convert string to float: " + v);
+        switch (v.typeCode()) {
+            case HVal.TYPE_FLOAT:   return v;
+            case HVal.TYPE_INTEGER: return new HVal.HFloat((double) ((HVal.HInteger) v).value());
+            case HVal.TYPE_STRING: {
+                try {
+                    return new HVal.HFloat(Double.parseDouble(((HVal.HString) v).value()));
+                } catch (NumberFormatException e) {
+                    throw new HelunaException("Cannot convert string to float: " + v);
+                }
             }
+            default: throw new HelunaException("Cannot convert " + typeName(v) + " to float");
         }
-        throw new HelunaException("Cannot convert " + typeName(v) + " to float");
     }
 
     private HVal toBool(HVal v) {
-        if (v instanceof HVal.HBoolean) return v;
-        if (v instanceof HVal.HInteger) return HVal.HBoolean.of(((HVal.HInteger) v).value() != 0);
-        if (v instanceof HVal.HFloat) return HVal.HBoolean.of(((HVal.HFloat) v).value() != 0.0);
-        if (v instanceof HVal.HString) return HVal.HBoolean.of(!((HVal.HString) v).value().isEmpty());
-        if (v instanceof HVal.HNothing) return HVal.HBoolean.FALSE;
-        return HVal.HBoolean.TRUE;
+        switch (v.typeCode()) {
+            case HVal.TYPE_BOOLEAN: return v;
+            case HVal.TYPE_INTEGER: return HVal.HBoolean.of(((HVal.HInteger) v).value() != 0);
+            case HVal.TYPE_FLOAT:   return HVal.HBoolean.of(((HVal.HFloat) v).value() != 0.0);
+            case HVal.TYPE_STRING:  return HVal.HBoolean.of(!((HVal.HString) v).value().isEmpty());
+            case HVal.TYPE_NOTHING: return HVal.HBoolean.FALSE;
+            default: return HVal.HBoolean.TRUE;
+        }
     }
 
     static String typeName(HVal v) {
-        if (v instanceof HVal.HString) return "string";
-        if (v instanceof HVal.HInteger) return "integer";
-        if (v instanceof HVal.HFloat) return "float";
-        if (v instanceof HVal.HBoolean) return "boolean";
-        if (v instanceof HVal.HNothing) return "nothing";
-        if (v instanceof HVal.HList) return "list";
-        if (v instanceof HVal.HRecord) return "record";
-        return "unknown";
+        switch (v.typeCode()) {
+            case HVal.TYPE_STRING:  return "string";
+            case HVal.TYPE_INTEGER: return "integer";
+            case HVal.TYPE_FLOAT:   return "float";
+            case HVal.TYPE_BOOLEAN: return "boolean";
+            case HVal.TYPE_NOTHING: return "nothing";
+            case HVal.TYPE_LIST:    return "list";
+            case HVal.TYPE_RECORD:  return "record";
+            default: return "unknown";
+        }
     }
 }
