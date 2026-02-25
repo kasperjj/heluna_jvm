@@ -42,7 +42,7 @@ public class Executor {
             this.resultSlot = resultSlot; this.slotA = slotA; this.slotB = slotB;
             this.srcTags = srcTags;
             this.elements = elements; this.size = elements.size();
-            this.result = (mode == 2) ? null : new HVal.HList();
+            this.result = (mode == 2) ? null : new HVal.HList(this.size);
             this.idx = 0;
         }
     }
@@ -134,32 +134,44 @@ public class Executor {
                 // --- Arithmetic ---
                 case ADD: {
                     HVal left = values[op1], right = values[op2];
-                    if (left.typeCode() == HVal.TYPE_INTEGER && right.typeCode() == HVal.TYPE_INTEGER) {
+                    byte lt = left.typeCode(), rt = right.typeCode();
+                    if (lt == HVal.TYPE_INTEGER && rt == HVal.TYPE_INTEGER) {
                         values[dest] = HVal.HInteger.of(((HVal.HInteger) left).value() + ((HVal.HInteger) right).value());
-                        applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
+                    } else if (lt == HVal.TYPE_FLOAT && rt == HVal.TYPE_FLOAT) {
+                        values[dest] = new HVal.HFloat(((HVal.HFloat) left).value() + ((HVal.HFloat) right).value());
                     } else {
                         execArith(dest, op1, op2, tagMode, '+');
+                        break;
                     }
+                    applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
                     break;
                 }
                 case SUB: {
                     HVal left = values[op1], right = values[op2];
-                    if (left.typeCode() == HVal.TYPE_INTEGER && right.typeCode() == HVal.TYPE_INTEGER) {
+                    byte lt = left.typeCode(), rt = right.typeCode();
+                    if (lt == HVal.TYPE_INTEGER && rt == HVal.TYPE_INTEGER) {
                         values[dest] = HVal.HInteger.of(((HVal.HInteger) left).value() - ((HVal.HInteger) right).value());
-                        applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
+                    } else if (lt == HVal.TYPE_FLOAT && rt == HVal.TYPE_FLOAT) {
+                        values[dest] = new HVal.HFloat(((HVal.HFloat) left).value() - ((HVal.HFloat) right).value());
                     } else {
                         execArith(dest, op1, op2, tagMode, '-');
+                        break;
                     }
+                    applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
                     break;
                 }
                 case MUL: {
                     HVal left = values[op1], right = values[op2];
-                    if (left.typeCode() == HVal.TYPE_INTEGER && right.typeCode() == HVal.TYPE_INTEGER) {
+                    byte lt = left.typeCode(), rt = right.typeCode();
+                    if (lt == HVal.TYPE_INTEGER && rt == HVal.TYPE_INTEGER) {
                         values[dest] = HVal.HInteger.of(((HVal.HInteger) left).value() * ((HVal.HInteger) right).value());
-                        applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
+                    } else if (lt == HVal.TYPE_FLOAT && rt == HVal.TYPE_FLOAT) {
+                        values[dest] = new HVal.HFloat(((HVal.HFloat) left).value() * ((HVal.HFloat) right).value());
                     } else {
                         execArith(dest, op1, op2, tagMode, '*');
+                        break;
                     }
+                    applyTagMode(dest, tagMode, tags[op1] | tags[op2]);
                     break;
                 }
                 case DIV: execArith(dest, op1, op2, tagMode, '/'); break;

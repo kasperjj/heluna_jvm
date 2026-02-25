@@ -28,7 +28,7 @@ public abstract class HVal {
 
     public static final class HInteger extends HVal {
         private static final int CACHE_LOW = -128;
-        private static final int CACHE_HIGH = 127;
+        private static final int CACHE_HIGH = 10000;
         private static final HInteger[] CACHE = new HInteger[CACHE_HIGH - CACHE_LOW + 1];
         static {
             for (int i = 0; i < CACHE.length; i++) {
@@ -172,6 +172,10 @@ public abstract class HVal {
 
         public HList() {
             this.elements = new ArrayList<>();
+        }
+
+        public HList(int initialCapacity) {
+            this.elements = new ArrayList<>(initialCapacity);
         }
 
         public HList(List<HVal> elements) {
