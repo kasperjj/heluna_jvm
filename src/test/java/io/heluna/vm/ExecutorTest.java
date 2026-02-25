@@ -956,4 +956,243 @@ class ExecutorTest {
         Executor ex = new Executor(pkt);
         assertThrows(HelunaException.class, ex::execute);
     }
+
+    // ========== Superinstructions ==========
+
+    @Test void testRecordGetC() {
+        // RECORD_GET_C: dest = record[constants[const_idx]]
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HString("name"), new HVal.HString("Alice")},
+                new int[][]{
+                    instr(0x60, 0, 0, 0),           // RECORD_NEW slot0
+                    instr(0x01, 1, 0, 0),            // slot1 = "name"
+                    instr(0x01, 2, 1, 0),            // slot2 = "Alice"
+                    instr(0x61, 0, 1, 2),            // RECORD_SET slot0["name"] = "Alice"
+                    instr(0xC1, 2, 0, 0),            // RECORD_GET_C slot2 = slot0[const[0]="name"]
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertEquals(new HVal.HString("Alice"), ex.getSlot(2));
+    }
+
+    @Test void testRecordGetCTagPropagation() {
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HString("key"), new HVal.HInteger(42)},
+                new int[][]{
+                    instr(0x60, 0, 0, 0),           // RECORD_NEW slot0
+                    instr(0x01, 1, 0, 0),            // slot1 = "key"
+                    instr(0x01, 2, 1, 0),            // slot2 = 42
+                    instr(0x61, 0, 1, 2),            // RECORD_SET slot0["key"] = 42
+                    instr(0xC1, 2, 0, 0),            // RECORD_GET_C slot2 = slot0[const[0]="key"]
+                });
+        Executor ex = new Executor(pkt);
+        ex.setSlot(0, new HVal.HRecord(), 0x0F);
+        // Build record manually
+        ((HVal.HRecord)ex.getSlot(0)).set("key", new HVal.HInteger(42));
+        ex.execute(pkt.instructions, 4, 5); // just the RECORD_GET_C
+        assertEquals(new HVal.HInteger(42), ex.getSlot(2));
+        assertEquals(0x0F, ex.getTag(2)); // tag propagated from record slot
+    }
+
+    @Test void testRecordSetC() {
+        // RECORD_SET_C: record[constants[const_idx]] = value
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HString("color"), new HVal.HString("blue")},
+                new int[][]{
+                    instr(0x60, 0, 0, 0),           // RECORD_NEW slot0
+                    instr(0x01, 1, 1, 0),            // slot1 = "blue"
+                    instr(0xC2, 0, 0, 1),            // RECORD_SET_C slot0[const[0]="color"] = slot1
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        HVal.HRecord rec = (HVal.HRecord) ex.getSlot(0);
+        assertEquals(new HVal.HString("blue"), rec.get("color"));
+    }
+
+    @Test void testRecordNewSetC() {
+        // RECORD_NEW_SET_C: dest = { constants[const_idx]: value }
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HString("x"), new HVal.HInteger(10)},
+                new int[][]{
+                    instr(0x01, 1, 1, 0),            // slot1 = 10
+                    instr(0xC3, 0, 0, 1),            // RECORD_NEW_SET_C slot0 = {const[0]="x": slot1}
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        HVal.HRecord rec = (HVal.HRecord) ex.getSlot(0);
+        assertEquals(new HVal.HInteger(10), rec.get("x"));
+    }
+
+    @Test void testStdlibCall1() {
+        // STDLIB_CALL_1: dest = stdlib[func_id]({value: slot})
+        // Use upper (0x0001) which takes {value: string}
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HString("hello")},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // slot0 = "hello"
+                    instr(0xC4, 1, 0x0001, 0),       // STDLIB_CALL_1 slot1 = upper({value: slot0})
+                });
+        Executor ex = new Executor(pkt);
+        ex.setStdLib(new StdLib());
+        ex.execute();
+        assertEquals(new HVal.HString("HELLO"), ex.getSlot(1));
+    }
+
+    @Test void testStdlibCall1SanitizerPassthrough() {
+        // func_id=0 is sanitizer passthrough — just returns the value
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HString("data")},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // slot0 = "data"
+                    instr(0xC4, 0x08, 1, 0, 0),      // STDLIB_CALL_1 with TAG_CLEAR, func=0, slot0
+                });
+        Executor ex = new Executor(pkt);
+        ex.setStdLib(new StdLib());
+        ex.setSlot(0, new HVal.HString("data"), 0xFF);
+        ex.execute(pkt.instructions, 1, 2);
+        assertEquals(new HVal.HString("data"), ex.getSlot(1));
+        assertEquals(0, ex.getTag(1)); // tag cleared
+    }
+
+    @Test void testCmpJumpEqTaken() {
+        // CMP_JUMP_EQ: jump when NOT equal (false path)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(1), new HVal.HInteger(2), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // 0: slot0 = 1
+                    instr(0x01, 1, 1, 0),            // 1: slot1 = 2
+                    instr(0xC5, 0, 4, 0, 1),         // 2: CMP_JUMP_EQ jump to 4 if slot0 != slot1
+                    instr(0x01, 2, 2, 0),            // 3: slot2 = 99 (skipped)
+                    instr(0x03, 2, 0, 0),            // 4: LOAD_NOTHING slot2
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(2).isNothing()); // jumped over slot2=99
+    }
+
+    @Test void testCmpJumpEqNotTaken() {
+        // When equal, should NOT jump (falls through)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(5), new HVal.HInteger(5), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // 0: slot0 = 5
+                    instr(0x01, 1, 1, 0),            // 1: slot1 = 5
+                    instr(0xC5, 0, 4, 0, 1),         // 2: CMP_JUMP_EQ jump to 4 if slot0 != slot1
+                    instr(0x01, 2, 2, 0),            // 3: slot2 = 99 (not skipped)
+                    instr(0x03, 2, 0, 0),            // 4: LOAD_NOTHING slot2 (overwrites)
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        // Falls through to slot2=99, then slot2=nothing
+        assertTrue(ex.getSlot(2).isNothing());
+    }
+
+    @Test void testCmpJumpNeq() {
+        // CMP_JUMP_NEQ: jump when equal (i.e., NEQ is false)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(5), new HVal.HInteger(5), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // 0: slot0 = 5
+                    instr(0x01, 1, 1, 0),            // 1: slot1 = 5
+                    instr(0xC6, 0, 4, 0, 1),         // 2: CMP_JUMP_NEQ jump to 4 if equal
+                    instr(0x01, 2, 2, 0),            // 3: slot2 = 99 (skipped)
+                    instr(0x03, 2, 0, 0),            // 4: LOAD_NOTHING slot2
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(2).isNothing()); // jumped
+    }
+
+    @Test void testCmpJumpLt() {
+        // CMP_JUMP_LT: jump when NOT lt (i.e., op1 >= op2)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(10), new HVal.HInteger(5), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // 0: slot0 = 10
+                    instr(0x01, 1, 1, 0),            // 1: slot1 = 5
+                    instr(0xC7, 0, 4, 0, 1),         // 2: CMP_JUMP_LT jump to 4 if !(10 < 5)
+                    instr(0x01, 2, 2, 0),            // 3: slot2 = 99 (skipped)
+                    instr(0x03, 2, 0, 0),            // 4: LOAD_NOTHING slot2
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(2).isNothing()); // jumped because 10 >= 5
+    }
+
+    @Test void testCmpJumpGt() {
+        // CMP_JUMP_GT: jump when NOT gt (i.e., op1 <= op2)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(3), new HVal.HInteger(5), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),
+                    instr(0x01, 1, 1, 0),
+                    instr(0xC8, 0, 4, 0, 1),         // CMP_JUMP_GT jump if !(3 > 5)
+                    instr(0x01, 2, 2, 0),
+                    instr(0x03, 2, 0, 0),
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(2).isNothing()); // jumped because 3 <= 5
+    }
+
+    @Test void testCmpJumpLte() {
+        // CMP_JUMP_LTE: jump when NOT lte (i.e., op1 > op2)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(10), new HVal.HInteger(5), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),
+                    instr(0x01, 1, 1, 0),
+                    instr(0xC9, 0, 4, 0, 1),         // CMP_JUMP_LTE jump if !(10 <= 5)
+                    instr(0x01, 2, 2, 0),
+                    instr(0x03, 2, 0, 0),
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(2).isNothing()); // jumped because 10 > 5
+    }
+
+    @Test void testCmpJumpGte() {
+        // CMP_JUMP_GTE: jump when NOT gte (i.e., op1 < op2)
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(3), new HVal.HInteger(5), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),
+                    instr(0x01, 1, 1, 0),
+                    instr(0xCA, 0, 4, 0, 1),         // CMP_JUMP_GTE jump if !(3 >= 5)
+                    instr(0x01, 2, 2, 0),
+                    instr(0x03, 2, 0, 0),
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(2).isNothing()); // jumped because 3 < 5
+    }
+
+    @Test void testIsNothingJumpTaken() {
+        // IS_NOTHING_JUMP: jump when value IS nothing
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x03, 0, 0, 0),            // 0: LOAD_NOTHING slot0
+                    instr(0xCB, 0, 3, 0, 0),         // 1: IS_NOTHING_JUMP jump to 3 if slot0 is nothing
+                    instr(0x01, 1, 0, 0),            // 2: slot1 = 99 (skipped)
+                    instr(0x03, 1, 0, 0),            // 3: LOAD_NOTHING slot1
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertTrue(ex.getSlot(1).isNothing()); // jumped over slot1=99
+    }
+
+    @Test void testIsNothingJumpNotTaken() {
+        // IS_NOTHING_JUMP: should NOT jump when value is NOT nothing
+        Packet pkt = makePacket(3,
+                new HVal[]{new HVal.HInteger(42), new HVal.HInteger(99)},
+                new int[][]{
+                    instr(0x01, 0, 0, 0),            // 0: slot0 = 42
+                    instr(0xCB, 0, 3, 0, 0),         // 1: IS_NOTHING_JUMP jump to 3 if slot0 is nothing
+                    instr(0x01, 1, 1, 0),            // 2: slot1 = 99 (not skipped)
+                });
+        Executor ex = new Executor(pkt);
+        ex.execute();
+        assertEquals(new HVal.HInteger(99), ex.getSlot(1)); // fell through
+    }
 }

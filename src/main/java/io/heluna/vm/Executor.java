@@ -23,6 +23,15 @@ public class Executor {
     public static final int STDLIB_CALL = 0xA0;
     public static final int TAG_SET = 0xB0, TAG_CHECK = 0xB1;
 
+    // Superinstructions
+    public static final int RECORD_GET_C = 0xC1, RECORD_SET_C = 0xC2;
+    public static final int RECORD_NEW_SET_C = 0xC3;
+    public static final int STDLIB_CALL_1 = 0xC4;
+    public static final int CMP_JUMP_EQ = 0xC5, CMP_JUMP_NEQ = 0xC6;
+    public static final int CMP_JUMP_LT = 0xC7, CMP_JUMP_GT = 0xC8;
+    public static final int CMP_JUMP_LTE = 0xC9, CMP_JUMP_GTE = 0xCA;
+    public static final int IS_NOTHING_JUMP = 0xCB;
+
     // Tag modes (from flags bits 3-4)
     public static final int TAG_PROPAGATE = 0, TAG_CLEAR = 1, TAG_MODE_SET = 2;
 
@@ -52,6 +61,7 @@ public class Executor {
     private final long[] tags;
     private final Deque<IterState> iterStack = new ArrayDeque<>();
     private StdLib stdLib;
+    private final HVal.HRecord stdlibArg1 = new HVal.HRecord();
 
     public Executor(Packet packet) {
         this.packet = packet;
@@ -460,6 +470,67 @@ public class Executor {
                     applyTagMode(dest, tagMode, 0);
                     break;
                 }
+
+                // --- Superinstructions ---
+                case RECORD_GET_C: {
+                    HVal.HRecord rec = asRecord(op1);
+                    String key = ((HVal.HString) packet.constants.get(op2)).value();
+                    values[dest] = rec.get(key);
+                    applyTagMode(dest, tagMode, tags[op1]);
+                    break;
+                }
+                case RECORD_SET_C: {
+                    HVal.HRecord rec = asRecord(dest);
+                    String key = ((HVal.HString) packet.constants.get(op1)).value();
+                    rec.set(key, values[op2]);
+                    tags[dest] = tags[dest] | tags[op2];
+                    break;
+                }
+                case RECORD_NEW_SET_C: {
+                    HVal.HRecord rec = new HVal.HRecord();
+                    String key = ((HVal.HString) packet.constants.get(op1)).value();
+                    rec.set(key, values[op2]);
+                    values[dest] = rec;
+                    applyTagMode(dest, tagMode, tags[op2]);
+                    break;
+                }
+                case STDLIB_CALL_1: {
+                    if (stdLib == null) {
+                        throw new HelunaException("StdLib not configured");
+                    }
+                    HVal result;
+                    if (op1 == 0) {
+                        result = values[op2];
+                    } else {
+                        stdlibArg1.clear();
+                        stdlibArg1.set("value", values[op2]);
+                        result = stdLib.call(op1, stdlibArg1);
+                    }
+                    values[dest] = result;
+                    applyTagMode(dest, tagMode, tags[op2]);
+                    break;
+                }
+                case CMP_JUMP_EQ:
+                    if (!valEquals(values[op1], values[op2])) { pc = dest; continue; }
+                    break;
+                case CMP_JUMP_NEQ:
+                    if (valEquals(values[op1], values[op2])) { pc = dest; continue; }
+                    break;
+                case CMP_JUMP_LT:
+                    if (!(valCompare(values[op1], values[op2]) < 0)) { pc = dest; continue; }
+                    break;
+                case CMP_JUMP_GT:
+                    if (!(valCompare(values[op1], values[op2]) > 0)) { pc = dest; continue; }
+                    break;
+                case CMP_JUMP_LTE:
+                    if (!(valCompare(values[op1], values[op2]) <= 0)) { pc = dest; continue; }
+                    break;
+                case CMP_JUMP_GTE:
+                    if (!(valCompare(values[op1], values[op2]) >= 0)) { pc = dest; continue; }
+                    break;
+                case IS_NOTHING_JUMP:
+                    if (values[op1].isNothing()) { pc = dest; continue; }
+                    break;
 
                 default:
                     throw new HelunaException(String.format("Unknown opcode 0x%02X at pc=%d", opcode, pc));

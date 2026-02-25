@@ -240,6 +240,10 @@ public abstract class HVal {
             fields.put(key, value);
         }
 
+        public void clear() {
+            fields.clear();
+        }
+
         public HVal get(String key) {
             HVal v = fields.get(key);
             return v != null ? v : HNothing.INSTANCE;
